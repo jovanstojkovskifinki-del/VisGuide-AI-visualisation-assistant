@@ -1,0 +1,1330 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>VisGuide — read the shape of your data</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<script src="https://cdn.plot.ly/plotly-2.32.0.min.js"></script>
+</head>
+<body>
+
+<a href="#main" class="skip-link">Skip to content</a>
+
+<header class="masthead">
+  <div class="wordmark"><span class="dot"></span>VisGuide</div>
+  <div class="tagline">structured data → the right view</div>
+</header>
+
+<main id="main">
+  <!-- LEFT COLUMN -->
+  <div>
+    <div class="panel">
+      <p class="eyebrow">Upload</p>
+      <div class="dropzone" id="dropzone" tabindex="0" role="button" aria-label="Upload a CSV or Excel file">
+        <span class="icon">⇪</span>
+        <p>Drop a CSV or Excel file, or click to browse.</p>
+        <p class="hint">.CSV &nbsp;·&nbsp; .XLSX &nbsp;·&nbsp; UP TO 50MB</p>
+      </div>
+      <input type="file" id="fileInput" accept=".csv,.xlsx">
+      <div class="file-chip" id="fileChip" style="display:none;">
+        <span id="fileChipName"></span>
+        <button id="resetBtn" type="button">clear</button>
+      </div>
+      <div id="uploadError"></div>
+    </div>
+
+    <div class="panel" id="readoutPanel" style="display:none;">
+      <p class="eyebrow">Readout</p>
+      <div class="stat-row"><span class="k">Rows</span><span class="v" id="statRows">—</span></div>
+      <div class="stat-row"><span class="k">Columns</span><span class="v" id="statCols">—</span></div>
+      <div class="stat-row"><span class="k">Duplicate rows</span><span class="v" id="statDupes">—</span></div>
+      <div class="column-list" id="columnList"></div>
+    </div>
+  </div>
+
+  <!-- RIGHT COLUMN -->
+  <div class="panel" id="resultPanel">
+    <div class="empty-state" id="emptyState">
+      <span class="glyph">◌</span>
+      <h2>Nothing to read yet</h2>
+      <p>Upload a dataset on the left. VisGuide will type each column, profile the data, and pick the view that shows it best.</p>
+    </div>
+
+    <div id="loadingState" style="display:none;">
+      <div class="loading-line"><div class="bar"></div><span id="loadingLabel">Reading file…</span></div>
+    </div>
+
+    <div id="pipelineError" style="display:none;"></div>
+
+    <div id="recommendationState" style="display:none;">
+      <div class="rec-header">
+        <div>
+          <p class="eyebrow">Recommendation</p>
+          <h2 class="rec-title" id="recTitle">—</h2>
+          <div class="rec-meta"><span class="engine-badge" id="engineBadge">RULE-BASED</span> &nbsp; matched: <span id="matchedRule">—</span></div>
+          <p class="rec-reasoning" id="recReasoning"></p>
+        </div>
+        <div class="dial-wrap">
+          <div class="dial" id="confidenceDial"></div>
+          <span class="dial-label">confidence</span>
+        </div>
+      </div>
+
+      <div class="chart-canvas" id="chartCanvas"></div>
+      <div class="state-bar" id="stateBar"></div>
+
+      <div class="chat-panel" id="chatPanel">
+        <div class="chat-header">
+          <p class="eyebrow" style="margin:0;">Ask VisGuide</p>
+          <div class="model-controls">
+            <span class="model-used-badge" id="modelUsedBadge"></span>
+            <select class="model-select" id="modelSelect" aria-label="Preferred AI model">
+              <option value="">Auto (recommended)</option>
+            </select>
+          </div>
+        </div>
+        <div class="chat-log" id="chatLog">
+          <p class="chat-empty">Try "make it a bar chart" or "group by region".</p>
+        </div>
+        <div class="quick-prompts" id="quickPrompts">
+          <button class="quick-prompt-chip" type="button" data-prompt="Show it as a bar chart">Bar chart</button>
+          <button class="quick-prompt-chip" type="button" data-prompt="Show the correlation heatmap">Correlation heatmap</button>
+          <button class="quick-prompt-chip" type="button" data-prompt="Which columns are most correlated?">Top correlations</button>
+          <button class="quick-prompt-chip" type="button" data-prompt="What percentage breakdown does this data have?">Percentages</button>
+        </div>
+        <div class="chat-input-row">
+          <input type="text" id="chatInput" placeholder="Describe the change you want…" aria-label="Message VisGuide about this visualization">
+          <button id="chatSendBtn" type="button">Send</button>
+        </div>
+      </div>
+
+      <button class="raw-data-toggle" id="rawToggle" type="button">
+        <span class="caret">▸</span>
+        <span id="rawToggleLabel">View raw data</span>
+      </button>
+      <div class="raw-table-wrap" id="rawTableWrap">
+        <table class="raw-table" id="rawTable"></table>
+      </div>
+    </div>
+  </div>
+</main>
+
+<footer class="text-center">
+  VisGuide · Module 1 — Structured Data Visualization.
+</footer>
+
+<script>
+(function () {
+  "use strict";
+
+  const API_BASE = "/api";
+  const state = {
+    datasetId: null,
+    file: null,
+    currentConfig: null,
+    dataRows: null,
+    activeRows: null, // dataRows, or a filtered subset when filters are active
+    dataSchema: null,
+    chatBusy: false,
+    preferredModel: null, // null = auto (server picks/falls back); otherwise a model id
+  };
+
+  // ---------- DOM refs ----------
+  const dropzone = document.getElementById("dropzone");
+  const fileInput = document.getElementById("fileInput");
+  const fileChip = document.getElementById("fileChip");
+  const fileChipName = document.getElementById("fileChipName");
+  const resetBtn = document.getElementById("resetBtn");
+  const uploadError = document.getElementById("uploadError");
+
+  const readoutPanel = document.getElementById("readoutPanel");
+  const statRows = document.getElementById("statRows");
+  const statCols = document.getElementById("statCols");
+  const statDupes = document.getElementById("statDupes");
+  const columnList = document.getElementById("columnList");
+
+  const emptyState = document.getElementById("emptyState");
+  const loadingState = document.getElementById("loadingState");
+  const loadingLabel = document.getElementById("loadingLabel");
+  const pipelineError = document.getElementById("pipelineError");
+  const recommendationState = document.getElementById("recommendationState");
+
+  const recTitle = document.getElementById("recTitle");
+  const engineBadge = document.getElementById("engineBadge");
+  const matchedRule = document.getElementById("matchedRule");
+  const recReasoning = document.getElementById("recReasoning");
+  const confidenceDial = document.getElementById("confidenceDial");
+  const chartCanvas = document.getElementById("chartCanvas");
+
+  const rawToggle = document.getElementById("rawToggle");
+  const rawToggleLabel = document.getElementById("rawToggleLabel");
+  const rawTableWrap = document.getElementById("rawTableWrap");
+  const rawTable = document.getElementById("rawTable");
+
+  const chatLog = document.getElementById("chatLog");
+  const chatInput = document.getElementById("chatInput");
+  const chatSendBtn = document.getElementById("chatSendBtn");
+  const modelUsedBadge = document.getElementById("modelUsedBadge");
+  const modelSelect = document.getElementById("modelSelect");
+  const stateBar = document.getElementById("stateBar");
+  const quickPrompts = document.getElementById("quickPrompts");
+
+  const VIZ_TITLES = {
+    LINE_CHART: "Line chart", BAR_CHART: "Bar chart", SCATTER_PLOT: "Scatter plot",
+    HISTOGRAM: "Histogram", HEATMAP: "Correlation heatmap", GEOGRAPHIC_MAP: "Geographic map",
+    CHOROPLETH_MAP: "Choropleth map", TABLE: "Data table",
+  };
+
+  // ---------- Upload interactions ----------
+  dropzone.addEventListener("click", () => fileInput.click());
+  dropzone.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" || e.key === " ") { e.preventDefault(); fileInput.click(); }
+  });
+  ["dragenter", "dragover"].forEach((evt) =>
+    dropzone.addEventListener(evt, (e) => { e.preventDefault(); dropzone.classList.add("dragover"); })
+  );
+  ["dragleave", "drop"].forEach((evt) =>
+    dropzone.addEventListener(evt, (e) => { e.preventDefault(); dropzone.classList.remove("dragover"); })
+  );
+  dropzone.addEventListener("drop", (e) => {
+    const file = e.dataTransfer.files[0];
+    if (file) handleFile(file);
+  });
+  fileInput.addEventListener("change", (e) => {
+    const file = e.target.files[0];
+    if (file) handleFile(file);
+  });
+  resetBtn.addEventListener("click", resetAll);
+  rawToggle.addEventListener("click", () => {
+    const isOpen = rawTableWrap.classList.toggle("open");
+    rawToggle.classList.toggle("open", isOpen);
+    rawToggleLabel.textContent = isOpen ? "Hide raw data" : "View raw data";
+  });
+
+  function handleFile(file) {
+    const name = file.name.toLowerCase();
+    if (!name.endsWith(".csv") && !name.endsWith(".xlsx")) {
+      showUploadError("Unsupported file — upload a .csv or .xlsx file.");
+      return;
+    }
+    uploadError.innerHTML = "";
+    state.file = file;
+    fileChipName.textContent = file.name;
+    fileChip.style.display = "flex";
+    uploadDataset(file);
+  }
+
+  function showUploadError(message) {
+    uploadError.innerHTML =
+      '<div class="error-banner"><strong>Upload failed</strong>' + escapeHtml(message) + "</div>";
+  }
+
+  function resetAll() {
+    state.datasetId = null;
+    state.file = null;
+    fileInput.value = "";
+    fileChip.style.display = "none";
+    uploadError.innerHTML = "";
+    readoutPanel.style.display = "none";
+    emptyState.style.display = "flex";
+    loadingState.style.display = "none";
+    pipelineError.style.display = "none";
+    recommendationState.style.display = "none";
+    rawTableWrap.classList.remove("open");
+    rawToggle.classList.remove("open");
+    rawToggleLabel.textContent = "View raw data";
+
+    state.currentConfig = null;
+    state.dataRows = null;
+    state.activeRows = null;
+    state.dataSchema = null;
+    stateBar.innerHTML = "";
+    resetChat();
+  }
+
+  // ---------- Chat ----------
+  function resetChat() {
+    chatLog.innerHTML = '<p class="chat-empty">Try "make it a bar chart" or "group by region".</p>';
+    chatInput.value = "";
+    quickPrompts.style.display = "flex";
+    setChatBusy(false);
+  }
+
+  function appendChatMessage(role, text) {
+    const emptyHint = chatLog.querySelector(".chat-empty");
+    if (emptyHint) emptyHint.remove();
+    quickPrompts.style.display = "none";
+    const bubble = document.createElement("div");
+    bubble.className = "chat-msg " + role;
+    bubble.textContent = text;
+    chatLog.appendChild(bubble);
+    chatLog.scrollTop = chatLog.scrollHeight;
+  }
+
+  function showTypingIndicator() {
+    const wrap = document.createElement("div");
+    wrap.className = "chat-msg assistant typing-indicator";
+    wrap.id = "typingIndicator";
+    wrap.innerHTML = '<span class="dot"></span><span class="dot"></span><span class="dot"></span>';
+    chatLog.appendChild(wrap);
+    chatLog.scrollTop = chatLog.scrollHeight;
+  }
+
+  function hideTypingIndicator() {
+    const el = document.getElementById("typingIndicator");
+    if (el) el.remove();
+  }
+
+  function flashChart() {
+    chartCanvas.classList.remove("chart-flash");
+    // Force reflow so the animation restarts if two updates land close together.
+    void chartCanvas.offsetWidth;
+    chartCanvas.classList.add("chart-flash");
+    setTimeout(() => chartCanvas.classList.remove("chart-flash"), 800);
+  }
+
+  function renderStateBar(config) {
+    if (!config) { stateBar.innerHTML = ""; return; }
+
+    const chips = [];
+
+    if (config.visualizationType) {
+      const label = VIZ_TITLES[config.visualizationType] || config.visualizationType;
+      chips.push(`<span class="state-chip chart-type">${escapeHtml(label)}</span>`);
+    }
+
+    const filters = config.filters || [];
+    filters.forEach((f) => {
+      const val = f.operator === "between"
+        ? `${f.value_min}–${f.value_max}`
+        : f.value;
+      chips.push(
+        `<span class="state-chip filter">${escapeHtml(f.column)} ${escapeHtml(f.operator)} ${escapeHtml(String(val))}</span>`
+      );
+    });
+
+    if (filters.length) {
+      chips.push('<button class="state-chip"><span class="clear-all-btn" id="clearFiltersBtn">Clear filters</span></button>');
+    }
+
+    stateBar.innerHTML = chips.join("");
+
+    const clearBtn = document.getElementById("clearFiltersBtn");
+    if (clearBtn) {
+      clearBtn.addEventListener("click", () => {
+        chatInput.value = "Clear all filters";
+        sendChatMessage();
+      });
+    }
+  }
+
+  quickPrompts.querySelectorAll(".quick-prompt-chip").forEach((chip) => {
+    chip.addEventListener("click", () => {
+      chatInput.value = chip.dataset.prompt;
+      sendChatMessage();
+    });
+  });
+
+  // ---------- Model status / selection ----------
+  let lastModelStatus = [];
+
+  function applyModelStatus(models) {
+    lastModelStatus = models || [];
+    const currentValue = modelSelect.value;
+
+    modelSelect.innerHTML = '<option value="">Auto (recommended)</option>';
+    lastModelStatus.forEach((m) => {
+      const opt = document.createElement("option");
+      opt.value = m.id;
+      opt.textContent = m.status === "available"
+        ? m.name
+        : `${m.name} — cooling down (${m.retry_in_seconds}s)`;
+      opt.disabled = m.status !== "available";
+      modelSelect.appendChild(opt);
+    });
+
+    if ([...modelSelect.options].some((o) => o.value === currentValue)) {
+      modelSelect.value = currentValue;
+    }
+  }
+
+  function showModelUsedBadge(modelId) {
+    if (!modelId) { modelUsedBadge.textContent = ""; return; }
+    const info = lastModelStatus.find((m) => m.id === modelId);
+    modelUsedBadge.textContent = info ? `via ${info.name}` : "";
+  }
+
+  async function refreshModelStatus() {
+    try {
+      const res = await fetch(`${API_BASE}/models/`);
+      if (!res.ok) return;
+      const body = await res.json();
+      applyModelStatus(body.models || []);
+    } catch (e) {
+      // Non-critical - the dropdown just stays at whatever it last showed.
+    }
+  }
+
+  modelSelect.addEventListener("change", () => {
+    state.preferredModel = modelSelect.value || null;
+  });
+
+  refreshModelStatus();
+
+  function setChatBusy(isBusy) {
+    state.chatBusy = isBusy;
+    chatSendBtn.disabled = isBusy;
+    chatInput.disabled = isBusy;
+    if (isBusy) {
+      showTypingIndicator();
+    } else {
+      hideTypingIndicator();
+    }
+  }
+
+  async function sendChatMessage() {
+    const text = chatInput.value.trim();
+    if (!text || state.chatBusy || !state.datasetId || !state.currentConfig) return;
+
+    appendChatMessage("user", text);
+    chatInput.value = "";
+    setChatBusy(true);
+
+    try {
+      const res = await fetch(`${API_BASE}/datasets/${state.datasetId}/messages/`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          message: text,
+          current_config: state.currentConfig,
+          data_schema: state.dataSchema,
+          preferred_model: state.preferredModel,
+        }),
+      });
+      const body = await res.json();
+      if (!res.ok) throw new ApiError(body);
+
+      hideTypingIndicator();
+
+      if (body.model_status) applyModelStatus(body.model_status);
+      showModelUsedBadge(body.model_used);
+
+      // No model answered at all (every option rate-limited/unreachable) -
+      // surface this distinctly from a normal answer so it doesn't read
+      // as "your data has no correlation" or similar.
+      appendChatMessage(body.model_used ? "assistant" : "error", body.reply || "Done.");
+
+      if (body.updated_config) {
+        state.currentConfig = body.updated_config;
+
+        // A filter_data call returns the real filtered row set on the
+        // config; clear_filters (or any command that doesn't touch
+        // filters) means there's nothing to override with, so fall back
+        // to the full original dataset.
+        state.activeRows = body.updated_config.filteredRows || state.dataRows;
+
+        renderRecommendation(
+          { visualization_type: body.updated_config.visualizationType,
+            confidence: 1,
+            matched_rule: "chat-adjusted",
+            reasoning: "" },
+          body.updated_config
+        );
+        renderChart(body.updated_config, state.activeRows);
+        renderRawTable(state.activeRows, body.updated_config.options && body.updated_config.options.columns);
+        renderStateBar(body.updated_config);
+        flashChart();
+
+        if (body.updated_config.filteredRows) {
+          const shown = body.updated_config.filteredRowCount;
+          const truncNote = body.updated_config.filteredTruncated
+            ? ` (showing first ${shown})`
+            : "";
+          appendChatMessage("assistant", `Showing ${shown} matching row(s)${truncNote}.`);
+        }
+      }
+    } catch (err) {
+      hideTypingIndicator();
+      const detail = err instanceof ApiError ? err.detail : "Couldn't reach VisGuide's chat right now.";
+      appendChatMessage("error", detail);
+    } finally {
+      setChatBusy(false);
+    }
+  }
+
+  chatSendBtn.addEventListener("click", sendChatMessage);
+  chatInput.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") { e.preventDefault(); sendChatMessage(); }
+  });
+
+  // ---------- Pipeline ----------
+  async function uploadDataset(file) {
+    setLoading(true, "Reading file…");
+    try {
+      const form = new FormData();
+      form.append("file", file);
+      const res = await fetch(`${API_BASE}/datasets/upload/`, { method: "POST", body: form });
+      const body = await res.json();
+      if (!res.ok) throw new ApiError(body);
+
+      state.datasetId = body.id;
+      renderReadoutFromUpload(body);
+      await runAnalysisPipeline(body.id);
+    } catch (err) {
+      setLoading(false);
+      showPipelineError(err);
+    }
+  }
+
+  async function runAnalysisPipeline(id) {
+    setLoading(true, "Typing columns and profiling data…");
+    const profileRes = await fetch(`${API_BASE}/datasets/${id}/profile/`);
+    const profile = await profileRes.json();
+    if (!profileRes.ok) throw new ApiError(profile);
+    renderReadoutColumns(profile);
+
+    setLoading(true, "Choosing the best view…");
+    const recRes = await fetch(`${API_BASE}/datasets/${id}/recommendation/`);
+    const recommendation = await recRes.json();
+    if (!recRes.ok) throw new ApiError(recommendation);
+
+    setLoading(true, "Building the chart…");
+    const [configRes, dataRes] = await Promise.all([
+      fetch(`${API_BASE}/datasets/${id}/visualization-config/`),
+      fetch(`${API_BASE}/datasets/${id}/data/`),
+    ]);
+    const config = await configRes.json();
+    const data = await dataRes.json();
+    if (!configRes.ok) throw new ApiError(config);
+    if (!dataRes.ok) throw new ApiError(data);
+
+    setLoading(false);
+    renderRecommendation(recommendation, config);
+    renderChart(config, data.rows);
+    renderRawTable(data.rows, config.options && config.options.columns);
+    renderStateBar(config);
+
+    state.currentConfig = config;
+    state.dataRows = data.rows;
+    state.activeRows = data.rows;
+    state.dataSchema = buildSchemaFromProfile(profile);
+    resetChat();
+  }
+
+  function buildSchemaFromProfile(profile) {
+  const schema = {};
+  (profile.column_profiles || []).forEach((cp) => {
+    schema[cp.column_name] = {
+      type: cp.detected_type,
+      sample_values: (cp.sample_values || []).slice(0, 5),
+    };
+  });
+  schema.__row_count__ = profile.row_count || null;
+  return schema;
+}
+
+  function setLoading(isLoading, label) {
+    if (isLoading) {
+      emptyState.style.display = "none";
+      pipelineError.style.display = "none";
+      recommendationState.style.display = "none";
+      loadingState.style.display = "block";
+      loadingLabel.textContent = label || "Working…";
+    } else {
+      loadingState.style.display = "none";
+    }
+  }
+
+  function showPipelineError(err) {
+    emptyState.style.display = "none";
+    recommendationState.style.display = "none";
+    pipelineError.style.display = "block";
+    const detail = err instanceof ApiError ? err.detail : "Something interrupted the pipeline. Try the file again.";
+    pipelineError.innerHTML =
+      '<div class="error-banner"><strong>Could not finish reading this dataset</strong>' + escapeHtml(detail) + "</div>";
+  }
+
+  class ApiError extends Error {
+    constructor(body) {
+      super(body && body.detail ? body.detail : "Request failed");
+      this.detail = (body && body.detail) || "Request failed.";
+    }
+  }
+
+  // ---------- Rendering: readout ----------
+  function renderReadoutFromUpload(dataset) {
+    readoutPanel.style.display = "block";
+    statRows.textContent = dataset.row_count != null ? dataset.row_count.toLocaleString() : "—";
+    statCols.textContent = dataset.column_count != null ? dataset.column_count : "—";
+    statDupes.textContent = "—";
+    columnList.innerHTML = "";
+  }
+
+  function renderReadoutColumns(profile) {
+    statDupes.textContent = profile.duplicate_row_count != null ? profile.duplicate_row_count : "0";
+    columnList.innerHTML = "";
+    (profile.column_profiles || []).forEach((cp) => {
+      const row = document.createElement("div");
+      row.className = "column-row";
+      row.innerHTML =
+        '<span class="column-name" title="' + escapeHtml(cp.column_name) + '">' + escapeHtml(cp.column_name) + "</span>" +
+        '<span class="type-chip type-' + cp.detected_type + '">' + cp.detected_type + "</span>";
+      columnList.appendChild(row);
+    });
+  }
+
+  // ---------- Rendering: recommendation + dial ----------
+  function renderRecommendation(recommendation, config) {
+    emptyState.style.display = "none";
+    pipelineError.style.display = "none";
+    recommendationState.style.display = "block";
+
+    recTitle.textContent = VIZ_TITLES[recommendation.visualization_type] || recommendation.visualization_type;
+    engineBadge.textContent = (config.metadata && config.metadata.engine) === "ollama" ? "AI (OLLAMA)" : "RULE-BASED";
+    matchedRule.textContent = recommendation.matched_rule || "fallback";
+    recReasoning.textContent = recommendation.reasoning || "";
+    drawConfidenceDial(recommendation.confidence || 0);
+  }
+
+  function drawConfidenceDial(confidence) {
+    const pct = Math.max(0, Math.min(1, confidence));
+    const cx = 70, cy = 66, r = 52;
+    const angle = Math.PI * (1 - pct); // 180deg (empty) -> 0deg (full)
+    const needleX = cx + r * Math.cos(angle);
+    const needleY = cy - r * Math.sin(angle);
+    const arcLen = Math.PI * r;
+    const dashOffset = arcLen * (1 - pct);
+
+    confidenceDial.innerHTML = `
+      <svg width="140" height="80" viewBox="0 0 140 80">
+        <path d="M 18 66 A 52 52 0 0 1 122 66" fill="none" stroke="rgba(255,255,255,0.09)" stroke-width="6" stroke-linecap="round"/>
+        <path d="M 18 66 A 52 52 0 0 1 122 66" fill="none" stroke="#ffb020" stroke-width="6" stroke-linecap="round"
+              stroke-dasharray="${arcLen}" stroke-dashoffset="${dashOffset}"/>
+        <line x1="${cx}" y1="${cy}" x2="${needleX}" y2="${needleY}" stroke="#ffb020" stroke-width="2"/>
+        <circle cx="${cx}" cy="${cy}" r="3.5" fill="#ffb020"/>
+        <text x="${cx}" y="${cy - 14}" text-anchor="middle" class="dial-value" font-family="IBM Plex Mono">${Math.round(pct * 100)}%</text>
+      </svg>`;
+  }
+
+  // ---------- Rendering: chart ----------
+  function renderChart(config, rows) {
+    const layoutBase = {
+      paper_bgcolor: "transparent",
+      plot_bgcolor: "transparent",
+      font: { color: "#8993a3", family: "IBM Plex Mono", size: 11 },
+      margin: { t: 20, r: 24, l: 56, b: 48 },
+      xaxis: { gridcolor: "rgba(255,255,255,0.06)", zerolinecolor: "rgba(255,255,255,0.12)" },
+      yaxis: { gridcolor: "rgba(255,255,255,0.06)", zerolinecolor: "rgba(255,255,255,0.12)" },
+    };
+    const plotConfig = { displayModeBar: false, responsive: true };
+    const type = config.visualizationType;
+
+    if (type === "LINE_CHART") {
+      const xCol = config.xAxis.column, yCol = config.yAxis.column;
+      const sorted = [...rows].sort((a, b) => (a[xCol] > b[xCol] ? 1 : -1));
+      Plotly.newPlot(chartCanvas, [{
+        x: sorted.map((r) => r[xCol]), y: sorted.map((r) => r[yCol]),
+        type: "scatter", mode: "lines+markers", line: { color: "#ffb020", width: 2 },
+        marker: { color: "#ffb020", size: 4 },
+      }], { ...layoutBase, xaxis: { ...layoutBase.xaxis, title: config.xAxis.label }, yaxis: { ...layoutBase.yaxis, title: config.yAxis.label } }, plotConfig);
+
+    } else if (type === "BAR_CHART") {
+      let categories, values;
+      if (config.aggregatedData) {
+        categories = config.aggregatedData.x;
+        values = config.aggregatedData.y;
+      } else {
+        const xCol = config.xAxis.column, yCol = config.yAxis.column;
+        const grouped = groupSum(rows, xCol, yCol);
+        categories = grouped.categories;
+        values = grouped.values;
+      }
+      Plotly.newPlot(chartCanvas, [{
+        x: categories, y: values, type: "bar", marker: { color: "#4cd6e0" },
+      }], { ...layoutBase, xaxis: { ...layoutBase.xaxis, title: config.xAxis.label }, yaxis: { ...layoutBase.yaxis, title: config.yAxis.label } }, plotConfig);
+
+    } else if (type === "SCATTER_PLOT") {
+      const xCol = config.xAxis.column, yCol = config.yAxis.column;
+      Plotly.newPlot(chartCanvas, [{
+        x: rows.map((r) => r[xCol]), y: rows.map((r) => r[yCol]),
+        mode: "markers", type: "scatter", marker: { color: "#b79cff", size: 6, opacity: 0.75 },
+      }], { ...layoutBase, xaxis: { ...layoutBase.xaxis, title: config.xAxis.label }, yaxis: { ...layoutBase.yaxis, title: config.yAxis.label } }, plotConfig);
+
+    } else if (type === "HISTOGRAM") {
+      const xCol = config.xAxis.column;
+      const nbins = (config.options && config.options.binCount) || 20;
+      Plotly.newPlot(chartCanvas, [{
+        x: rows.map((r) => r[xCol]), type: "histogram", nbinsx: nbins, marker: { color: "#ffb020" },
+      }], { ...layoutBase, xaxis: { ...layoutBase.xaxis, title: config.xAxis.label }, yaxis: { ...layoutBase.yaxis, title: "Frequency" } }, plotConfig);
+
+    } else if (type === "HEATMAP") {
+      const matrix = config.metadata && config.metadata.correlationMatrix;
+      if (!matrix) { renderUnavailable("No correlation matrix available for this dataset."); return; }
+      Plotly.newPlot(chartCanvas, [{
+        z: matrix.matrix, x: matrix.columns, y: matrix.columns, type: "heatmap",
+        colorscale: "RdBu", zmin: -1, zmax: 1,
+      }], { ...layoutBase, margin: { t: 20, r: 24, l: 90, b: 90 } }, plotConfig);
+
+    } else if (type === "GEOGRAPHIC_MAP" || type === "CHOROPLETH_MAP") {
+      const lonCol = config.xAxis.column, latCol = config.yAxis.column;
+      Plotly.newPlot(chartCanvas, [{
+        type: "scattergeo", lon: rows.map((r) => r[lonCol]), lat: rows.map((r) => r[latCol]),
+        mode: "markers", marker: { color: "#6ee7b7", size: 6, opacity: 0.8 },
+      }], { ...layoutBase, geo: { bgcolor: "transparent", showland: true, landcolor: "#171c25", showcountries: true, countrycolor: "rgba(255,255,255,0.12)", coastlinecolor: "rgba(255,255,255,0.12)" } }, plotConfig);
+
+    } else {
+      renderUnavailable("This dataset didn't match a specific chart type — showing it as a table instead.");
+    }
+  }
+
+  function renderUnavailable(message) {
+    chartCanvas.innerHTML = '<div class="empty-state"><span class="glyph">—</span><p>' + escapeHtml(message) + "</p></div>";
+  }
+
+  function groupSum(rows, categoryCol, valueCol) {
+    const totals = new Map();
+    rows.forEach((r) => {
+      const key = r[categoryCol];
+      const val = Number(r[valueCol]) || 0;
+      totals.set(key, (totals.get(key) || 0) + val);
+    });
+    const entries = [...totals.entries()].sort((a, b) => b[1] - a[1]);
+    return { categories: entries.map((e) => e[0]), values: entries.map((e) => e[1]) };
+  }
+
+  // ---------- Rendering: raw table ----------
+  function renderRawTable(rows, preferredColumns) {
+    if (!rows || rows.length === 0) { rawTable.innerHTML = ""; return; }
+    const columns = preferredColumns && preferredColumns.length ? preferredColumns : Object.keys(rows[0]);
+    const displayRows = rows.slice(0, 100);
+
+    const thead = "<thead><tr>" + columns.map((c) => "<th>" + escapeHtml(c) + "</th>").join("") + "</tr></thead>";
+    const tbody = "<tbody>" + displayRows.map((row) =>
+      "<tr>" + columns.map((c) => "<td>" + escapeHtml(String(row[c] ?? "")) + "</td>").join("") + "</tr>"
+    ).join("") + "</tbody>";
+
+    rawTable.innerHTML = thead + tbody;
+  }
+
+  function escapeHtml(str) {
+    const div = document.createElement("div");
+    div.textContent = str;
+    return div.innerHTML;
+  }
+})();
+</script>
+
+</body>
+</html>
+<style>
+  :root {
+    --bg-void: #1a1e28;
+    --bg-panel: #262c39;
+    --bg-panel-raised: #323b4d;
+    --ink-primary: #ffffff;
+    --ink-secondary: #d1d8e0;
+    --ink-tertiary: #a0acbf;
+    --accent-amber: #ffb82e;
+    --accent-amber-dim: #996a14;
+    --accent-cyan: #52e1eb;
+    --accent-violet: #c3abff;
+    --accent-green: #7bf0c2;
+    --danger: #ff8585;
+    --grid-line: rgba(255, 255, 255, 0.15);
+    --panel-shadow: 0 6px 24px rgba(0, 0, 0, 0.45);
+    --font-display: 'Space Grotesk', sans-serif;
+    --font-body: 'Inter', sans-serif;
+    --font-mono: 'IBM Plex Mono', monospace;
+  }
+
+  * { box-sizing: border-box; }
+
+  html, body {
+    margin: 0;
+    padding: 0;
+    background: var(--bg-void);
+    color: var(--ink-primary);
+    font-family: var(--font-body);
+    font-size: 18px; /* High legibility baseline */
+    line-height: 1.6;
+    background-image:
+      linear-gradient(var(--grid-line) 1px, transparent 1px),
+      linear-gradient(90deg, var(--grid-line) 1px, transparent 1px);
+    background-size: 36px 36px;
+    background-attachment: fixed;
+  }
+
+  a { color: inherit; }
+
+  h1, h2, h3, h4 {
+    font-family: var(--font-display);
+    margin-top: 0;
+    color: var(--ink-primary);
+    letter-spacing: -0.01em;
+  }
+
+  h1 { font-size: 32px; line-height: 1.2; font-weight: 800; }
+  h2 { font-size: 26px; line-height: 1.25; font-weight: 700; margin-bottom: 12px; }
+  h3 { font-size: 21px; line-height: 1.3; font-weight: 700; margin-bottom: 10px; }
+
+  .skip-link {
+    position: absolute;
+    left: -999px;
+    top: 0;
+    background: var(--accent-amber);
+    color: var(--bg-void);
+    padding: 12px 20px;
+    font-size: 18px;
+    font-weight: 700;
+    z-index: 100;
+  }
+  .skip-link:focus { left: 16px; top: 16px; }
+
+  header.masthead {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 28px 48px;
+    border-bottom: 2px solid var(--grid-line);
+    background: rgba(20, 24, 32, 0.95);
+    backdrop-filter: blur(8px);
+    position: sticky;
+    top: 0;
+    z-index: 10;
+  }
+
+  .wordmark h1 {
+    margin: 0;
+    display: flex;
+    align-items: center;
+    gap: 16px;
+  }
+  .wordmark .dot {
+    width: 16px;
+    height: 16px;
+    border-radius: 50%;
+    background: var(--accent-amber);
+    box-shadow: 0 0 14px 4px var(--accent-amber-dim);
+  }
+
+  .tagline {
+    font-family: var(--font-mono);
+    font-size: 15px;
+    font-weight: 600;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--ink-tertiary);
+  }
+
+  main {
+    max-width: 1600px;
+    margin: 0 auto;
+    padding: 48px 48px 100px;
+    display: grid;
+    grid-template-columns: 460px 1fr;
+    gap: 36px;
+  }
+
+  @media (max-width: 1200px) {
+    main { grid-template-columns: 1fr; padding: 24px; }
+  }
+
+  .panel {
+    background: var(--bg-panel);
+    border: 2px solid var(--grid-line);
+    box-shadow: var(--panel-shadow);
+    padding: 36px;
+    border-radius: 8px;
+  }
+
+  .panel + .panel { margin-top: 32px; }
+
+  .panel-desc {
+    font-size: 17px;
+    line-height: 1.6;
+    color: var(--ink-secondary);
+    margin: 0 0 24px;
+  }
+
+  .eyebrow {
+    font-family: var(--font-mono);
+    font-size: 14px;
+    font-weight: 700;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--accent-amber);
+    margin: 0 0 12px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+  .eyebrow::before {
+    content: '';
+    width: 20px;
+    height: 2px;
+    background: var(--accent-amber);
+  }
+
+  /* ---- Upload dropzone ---- */
+  .dropzone {
+    border: 3px dashed var(--accent-amber);
+    padding: 48px 28px;
+    text-align: center;
+    cursor: pointer;
+    background: rgba(255, 184, 46, 0.03);
+    transition: background 0.15s ease, border-color 0.15s ease;
+    border-radius: 8px;
+  }
+  .dropzone:hover, .dropzone.dragover {
+    border-color: #ffffff;
+    background: rgba(255, 184, 46, 0.08);
+  }
+  .dropzone:focus-visible {
+    outline: 4px solid var(--accent-amber);
+    outline-offset: 4px;
+  }
+  .dropzone p {
+    margin: 0;
+    font-size: 19px;
+    font-weight: 600;
+    color: var(--ink-primary);
+  }
+  .dropzone .icon {
+    font-family: var(--font-mono);
+    font-size: 40px;
+    color: var(--accent-amber);
+    margin-bottom: 16px;
+    display: block;
+  }
+  .dropzone .hint {
+    font-family: var(--font-mono);
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--ink-tertiary);
+    margin-top: 14px;
+    letter-spacing: 0.06em;
+  }
+  input[type="file"] { display: none; }
+
+  .file-chip {
+    margin-top: 20px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    font-family: var(--font-mono);
+    font-size: 16px;
+    font-weight: 600;
+    background: var(--bg-panel-raised);
+    border: 2px solid var(--grid-line);
+    padding: 14px 18px;
+    border-radius: 6px;
+  }
+  .file-chip button {
+    background: none;
+    border: none;
+    color: var(--danger);
+    cursor: pointer;
+    font-family: var(--font-mono);
+    font-size: 15px;
+    font-weight: 700;
+    text-decoration: underline;
+    padding: 4px 8px;
+  }
+  .file-chip button:hover { color: #ffffff; }
+
+  /* ---- Readout list ---- */
+  .stat-row {
+    display: flex;
+    justify-content: space-between;
+    font-size: 18px;
+    padding: 14px 0;
+    border-bottom: 1px solid var(--grid-line);
+  }
+  .stat-row:last-child { border-bottom: none; }
+  .stat-row .k { color: var(--ink-secondary); }
+  .stat-row .v { font-family: var(--font-mono); font-weight: 700; color: var(--ink-primary); }
+
+  .column-list { margin-top: 12px; }
+  .column-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    padding: 12px 0;
+    border-bottom: 1px solid var(--grid-line);
+  }
+  .column-row:last-child { border-bottom: none; }
+  .column-name {
+    font-size: 17px;
+    font-weight: 600;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .type-chip {
+    font-family: var(--font-mono);
+    font-size: 13px;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    padding: 6px 12px;
+    border-radius: 4px;
+    white-space: nowrap;
+    border: 2px solid transparent;
+  }
+  .type-NUMERIC     { color: var(--accent-cyan);   background: rgba(82,225,235,0.15);   border-color: rgba(82,225,235,0.4); }
+  .type-CATEGORICAL { color: var(--accent-violet); background: rgba(195,171,255,0.15); border-color: rgba(195,171,255,0.4); }
+  .type-DATETIME    { color: var(--accent-amber);  background: rgba(255,184,46,0.15);  border-color: rgba(255,184,46,0.4); }
+  .type-BOOLEAN     { color: var(--accent-green);  background: rgba(123,240,194,0.15); border-color: rgba(123,240,194,0.4); }
+  .type-LATITUDE, .type-LONGITUDE { color: var(--accent-green); background: rgba(123,240,194,0.15); border-color: rgba(123,240,194,0.4); }
+  .type-IDENTIFIER, .type-UNKNOWN { color: var(--ink-tertiary); background: rgba(255,255,255,0.08); border-color: var(--grid-line); }
+
+  /* ---- Recommendation panel ---- */
+  .rec-header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 28px;
+    flex-wrap: wrap;
+  }
+  .rec-meta {
+    font-family: var(--font-mono);
+    font-size: 15px;
+    font-weight: 600;
+    color: var(--ink-secondary);
+    letter-spacing: 0.04em;
+    margin-bottom: 12px;
+  }
+  .rec-reasoning {
+    margin: 18px 0 0;
+    font-size: 18px;
+    line-height: 1.6;
+    color: var(--ink-primary);
+  }
+  .engine-badge {
+    font-family: var(--font-mono);
+    font-size: 13px;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    padding: 6px 12px;
+    border: 2px solid var(--grid-line);
+    color: var(--accent-amber);
+    background: var(--bg-panel-raised);
+  }
+
+  /* ---- Confidence dial ---- */
+  .dial-wrap {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    flex-shrink: 0;
+    background: var(--bg-panel-raised);
+    padding: 16px;
+    border: 2px solid var(--grid-line);
+    border-radius: 6px;
+  }
+  .dial svg { display: block; }
+  .dial-value {
+    font-family: var(--font-mono);
+    font-size: 20px;
+    font-weight: 700;
+    fill: var(--accent-amber);
+  }
+  .dial-label {
+    font-family: var(--font-mono);
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: 0.14em;
+    color: var(--ink-secondary);
+    text-transform: uppercase;
+    margin-top: 8px;
+  }
+
+  /* ---- Chart canvas ---- */
+  .chart-canvas {
+    margin-top: 32px;
+    min-height: 520px;
+    border: 2px solid var(--grid-line);
+    background: var(--bg-panel-raised);
+    border-radius: 6px;
+  }
+
+  /* ---- Raw data ---- */
+  .raw-data-toggle {
+    margin-top: 28px;
+    background: var(--bg-panel-raised);
+    border: 2px solid var(--grid-line);
+    color: var(--ink-primary);
+    font-family: var(--font-mono);
+    font-size: 16px;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    cursor: pointer;
+    padding: 12px 20px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    border-radius: 6px;
+  }
+  .raw-data-toggle:hover { border-color: var(--accent-amber); color: var(--accent-amber); }
+  .raw-data-toggle .caret { transition: transform 0.15s ease; display: inline-block; font-size: 18px; }
+  .raw-data-toggle.open .caret { transform: rotate(90deg); }
+
+  .raw-table-wrap {
+    margin-top: 16px;
+    max-height: 440px;
+    overflow: auto;
+    border: 2px solid var(--grid-line);
+    display: none;
+    border-radius: 6px;
+  }
+  .raw-table-wrap.open { display: block; }
+  table.raw-table {
+    border-collapse: collapse;
+    width: 100%;
+    font-family: var(--font-mono);
+    font-size: 15px;
+  }
+  table.raw-table th, table.raw-table td {
+    text-align: left;
+    padding: 12px 18px;
+    border-bottom: 1px solid var(--grid-line);
+    white-space: nowrap;
+  }
+  table.raw-table th {
+    color: var(--accent-amber);
+    font-size: 15px;
+    font-weight: 700;
+    position: sticky;
+    top: 0;
+    background: var(--bg-panel-raised);
+    border-bottom: 2px solid var(--grid-line);
+  }
+
+  /* ---- Empty / loading / error states ---- */
+  .empty-state {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    text-align: center;
+    padding: 120px 40px;
+    color: var(--ink-secondary);
+  }
+  .empty-state .glyph {
+    font-family: var(--font-mono);
+    font-size: 48px;
+    color: var(--accent-amber);
+    margin-bottom: 20px;
+  }
+  .empty-state p { max-width: 48ch; font-size: 18px; line-height: 1.6; margin: 0; }
+
+  .loading-line {
+    font-family: var(--font-mono);
+    font-size: 18px;
+    font-weight: 700;
+    color: var(--accent-amber);
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    padding: 20px 0;
+  }
+  .loading-line .bar {
+    width: 100px;
+    height: 6px;
+    background: var(--grid-line);
+    position: relative;
+    overflow: hidden;
+    border-radius: 3px;
+  }
+  .loading-line .bar::after {
+    content: '';
+    position: absolute;
+    left: -40%;
+    width: 40%;
+    height: 100%;
+    background: var(--accent-amber);
+    animation: sweep 1.1s ease-in-out infinite;
+  }
+
+  .error-banner {
+    border: 2px solid var(--danger);
+    background: rgba(255, 133, 133, 0.12);
+    color: #ffffff;
+    padding: 20px 24px;
+    font-size: 17px;
+    margin-top: 20px;
+    line-height: 1.6;
+    border-radius: 6px;
+  }
+
+  footer {
+    max-width: 1600px;
+    margin: 0 auto;
+    padding: 0 48px 80px;
+    font-family: var(--font-mono);
+    font-size: 14px;
+    font-weight: 500;
+    color: var(--ink-tertiary);
+    letter-spacing: 0.02em;
+  }
+
+  /* ---- Chat panel ---- */
+  .chat-panel {
+    margin-top: 32px;
+    border: 2px solid var(--grid-line);
+    border-left: 6px solid var(--accent-amber);
+    background: var(--bg-panel-raised);
+    box-shadow: var(--panel-shadow);
+    display: flex;
+    flex-direction: column;
+    border-radius: 6px;
+  }
+  .chat-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 20px 24px;
+    border-bottom: 2px solid var(--grid-line);
+  }
+  .model-controls {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+  .model-used-badge {
+    font-family: var(--font-mono);
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--accent-cyan);
+    white-space: nowrap;
+  }
+  .model-select {
+    background: var(--bg-panel);
+    border: 2px solid var(--grid-line);
+    color: var(--ink-primary);
+    font-family: var(--font-mono);
+    font-size: 14px;
+    font-weight: 600;
+    padding: 8px 12px;
+    border-radius: 4px;
+  }
+
+  .chat-log {
+    max-height: 400px;
+    overflow-y: auto;
+    padding: 24px;
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+  }
+  .chat-msg {
+    max-width: 85%;
+    font-size: 17px;
+    line-height: 1.6;
+    padding: 14px 18px;
+    border: 2px solid var(--grid-line);
+    border-radius: 6px;
+  }
+  .chat-msg.user {
+    align-self: flex-end;
+    background: rgba(255, 184, 46, 0.12);
+    border-color: rgba(255, 184, 46, 0.4);
+    color: #ffffff;
+    font-weight: 600;
+  }
+  .chat-msg.assistant {
+    align-self: flex-start;
+    background: var(--bg-panel);
+    color: var(--ink-primary);
+  }
+  .chat-empty {
+    font-size: 16px;
+    color: var(--ink-tertiary);
+  }
+  .chat-input-row {
+    display: flex;
+    gap: 12px;
+    padding: 20px 24px;
+    border-top: 2px solid var(--grid-line);
+  }
+  .chat-input-row input {
+    flex: 1;
+    background: var(--bg-panel);
+    border: 2px solid var(--grid-line);
+    color: var(--ink-primary);
+    font-family: var(--font-body);
+    font-size: 17px;
+    padding: 14px 16px;
+    border-radius: 4px;
+  }
+  .chat-input-row input:focus {
+    outline: none;
+    border-color: var(--accent-amber);
+  }
+  .chat-input-row button {
+    background: var(--accent-amber);
+    color: var(--bg-void);
+    border: none;
+    font-family: var(--font-mono);
+    font-size: 15px;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    padding: 0 28px;
+    cursor: pointer;
+    border-radius: 4px;
+  }
+
+  /* ---- State bar ---- */
+  .state-bar {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 10px;
+    margin-top: 20px;
+  }
+  .state-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    font-family: var(--font-mono);
+    font-size: 14px;
+    font-weight: 600;
+    padding: 8px 14px;
+    border: 2px solid var(--grid-line);
+    color: var(--ink-primary);
+    background: var(--bg-panel);
+    border-radius: 4px;
+  }
+  .state-chip.chart-type {
+    color: var(--accent-amber);
+    border-color: rgba(255, 184, 46, 0.5);
+  }
+
+  /* ---- Quick-start suggestion chips ---- */
+  .quick-prompts {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    padding: 0 24px 18px;
+  }
+  .quick-prompt-chip {
+    background: var(--bg-panel);
+    border: 2px solid var(--grid-line);
+    color: var(--ink-primary);
+    font-family: var(--font-body);
+    font-size: 15px;
+    font-weight: 600;
+    padding: 10px 16px;
+    cursor: pointer;
+    border-radius: 4px;
+  }
+  .quick-prompt-chip:hover {
+    border-color: var(--accent-amber);
+    color: var(--accent-amber);
+  }
+</style>
